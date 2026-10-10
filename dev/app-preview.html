@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Main window preview (dev only)</title>
+    <script>
+      // Stand-in for Tauri's IPC with sample data, so the main window can be
+      // styled in a browser. Not part of the app build.
+      const callbacks = {};
+      let next = 1;
+      const now = Date.now();
+      const status = new URLSearchParams(location.search).get("status") || "ready";
+      const history = [
+        { id: 3, text: "Let's move the design review to Thursday afternoon so the whole team can make it.", rawText: "", createdAt: now - 6e5, durationMs: 5200, wordCount: 16, pasted: true },
+        { id: 2, text: "Can you send me the latest version of the onboarding flow?", rawText: "", createdAt: now - 36e5, durationMs: 3900, wordCount: 11, pasted: false },
+        { id: 1, text: "Remember to pick up groceries after work.", rawText: "", createdAt: now - 9e7, durationMs: 2600, wordCount: 7, pasted: true },
+      ];
+      const responses = {
+        get_settings: { hotkey: [17, 91], microphone: null, removeFillers: true, fillerWords: ["um", "uh", "uhm", "erm", "eh", "ah", "hm", "mhm", "mm", "you know"], trailingSpace: true, pasteIntoApp: true, soundCues: true, soundStyle: "airy", autostartConfigured: true },
+        hotkey_labels: ["Ctrl", "Win"],
+        model_status: status === "downloading" ? { state: "downloading", downloaded: 271e6, total: 670e6 } : { state: status },
+        get_stats: { totalWords: 1284, totalEntries: 96, totalDurationMs: 540000 },
+        get_history: history,
+        list_microphones: ["Microphone (Logitech G Pro X)", "Headset (WH-1000XM4)"],
+        "plugin:autostart|is_enabled": true,
+        "plugin:window|is_maximized": false,
+        default_filler_words: ["um", "uh", "uhm", "erm", "eh", "ah", "hm", "mhm", "mm"],
+      };
+      window.__TAURI_INTERNALS__ = {
+        metadata: { currentWindow: { label: "main" }, currentWebview: { label: "main", windowLabel: "main" } },
+        transformCallback(cb) { const id = next++; callbacks[id] = cb; return id; },
+        unregisterCallback(id) { delete callbacks[id]; },
+        async invoke(cmd, args) {
+          if (cmd === "plugin:event|listen") return next++;
+          if (cmd === "update_settings") return (responses.get_settings = args.settings);
+          return cmd in responses ? responses[cmd] : null;
+        },
+      };
+      window.__TAURI_EVENT_PLUGIN_INTERNALS__ = { unregisterListener() {} };
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

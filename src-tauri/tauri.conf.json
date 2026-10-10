@@ -1,0 +1,60 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Yappers",
+  "version": "0.1.0",
+  "identifier": "app.murmur.desktop",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "Yappers",
+        "url": "index.html",
+        "width": 1040,
+        "height": 720,
+        "minWidth": 760,
+        "minHeight": 560,
+        "visible": false,
+        "theme": "Light",
+        "backgroundColor": "#FFF8F2",
+        "center": true,
+        "decorations": false,
+        "shadow": true
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": [
+      "nsis"
+    ],
+    "publisher": "Yappers",
+    "shortDescription": "Free, private voice dictation",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser"
+      }
+    },
+    "resources": {
+      "redist/msvcp140.dll": "msvcp140.dll",
+      "redist/msvcp140_1.dll": "msvcp140_1.dll",
+      "redist/vcruntime140.dll": "vcruntime140.dll",
+      "redist/vcruntime140_1.dll": "vcruntime140_1.dll"
+    }
+  }
+}

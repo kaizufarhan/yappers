@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Overlay motion preview (dev only)</title>
+    <style>
+      html,
+      body {
+        margin: 0;
+        background: #3a3a3a !important;
+      }
+      #frame {
+        width: 300px;
+        height: 48px;
+        margin: 80px auto;
+        border-radius: 0;
+        overflow: hidden;
+      }
+      #frame #root,
+      #frame .h-screen {
+        height: 48px !important;
+      }
+      #frame .w-screen {
+        width: 300px !important;
+      }
+    </style>
+    <script>
+      // Minimal stand-in for Tauri's IPC so the overlay can run in a browser.
+      // Not part of the app build (vite.config.ts only bundles index/overlay).
+      const callbacks = {};
+      const listeners = {};
+      let next = 1;
+      window.__TAURI_INTERNALS__ = {
+        transformCallback(cb) {
+          const id = next++;
+          callbacks[id] = cb;
+          return id;
+        },
+        unregisterCallback(id) {
+          delete callbacks[id];
+        },
+        async invoke(cmd, args) {
+          if (cmd === "plugin:event|listen") {
+            (listeners[args.event] ||= []).push(args.handler);
+            return args.handler;
+          }
+          if (cmd === "overlay_snapshot") return { revision: 0, state: { state: "hidden" } };
+          return null;
+        },
+      };
+      window.__TAURI_EVENT_PLUGIN_INTERNALS__ = { unregisterListener() {} };
+      window.emitMock = (event, payload) =>
+        (listeners[event] || []).forEach((id) => callbacks[id]?.({ event, id, payload }));
+    </script>
+  </head>
+  <body>
+    <div id="frame"><div id="root"></div></div>
+    <div style="display: flex; gap: 8px; justify-content: center; font: 14px system-ui">
+      <button onclick="play(false)">Replay hold</button>
+      <button onclick="play(true)">Replay hands-free</button>
+    </div>
+    <script type="module" src="/src/overlay/main.tsx"></script>
+    <script>
+      // Replays a dictation: preview passes arrive every ~400 ms, several words at a time.
+      const passes = [
+        "So",
+        "So I think",
+        "So I think that's what",
+        "I think that's what I'm saying",
+        "that's what I'm saying about the new",
+        "what I'm saying about the new dictation app",
+        "about the new dictation app we should ship",
+        "dictation app we should ship on Friday.",
+      ];
+      let rev = 1;
+      window.play = (locked) => {
+        const session = Date.now();
+        emitMock("overlay-state", { revision: rev++, state: { state: locked ? "locked" : "recording" } });
+        passes.forEach((text, i) =>
+          setTimeout(() => emitMock("live-text", { session, text }), 700 + i * 420),
+        );
+        setTimeout(() => emitMock("overlay-state", { revision: rev++, state: { state: "processing" } }), 700 + passes.length * 420 + 600);
+      };
+    </script>
+  </body>
+</html>
