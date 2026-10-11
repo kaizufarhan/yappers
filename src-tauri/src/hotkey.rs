@@ -14,9 +14,11 @@ use windows::Win32::Foundation::{LPARAM, LRESULT, WPARAM};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetAsyncKeyState, SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP, VIRTUAL_KEY,
 };
+use windows::Win32::System::Threading::{GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_TIME_CRITICAL};
 use windows::Win32::UI::WindowsAndMessaging::{
-    CallNextHookEx, DispatchMessageW, GetForegroundWindow, GetMessageW, SetWindowsHookExW, TranslateMessage, HC_ACTION,
-    KBDLLHOOKSTRUCT, LLKHF_INJECTED, MSG, WH_KEYBOARD_LL, WM_KEYDOWN, WM_KEYUP, WM_SYSKEYDOWN, WM_SYSKEYUP,
+    CallNextHookEx, DispatchMessageW, GetForegroundWindow, GetMessageW, SetTimer, SetWindowsHookExW, TranslateMessage,
+    UnhookWindowsHookEx, HC_ACTION, HHOOK, KBDLLHOOKSTRUCT, LLKHF_INJECTED, MSG, WH_KEYBOARD_LL, WM_KEYDOWN, WM_KEYUP,
+    WM_SYSKEYDOWN, WM_SYSKEYUP, WM_TIMER,
 };
 
 const VK_ESCAPE: u32 = 0x1B;
@@ -95,23 +97,55 @@ pub fn set_capturing(on: bool) {
     RESET_GENERATION.fetch_add(1, Ordering::SeqCst);
 }
 
+/// How often the hook is replaced with a fresh one (see `start`).
+const REINSTALL_EVERY_MS: u32 = 5_000;
+
 /// Installs the hook on a dedicated thread with its own message loop.
+///
+/// Windows silently removes a low-level hook whose callback ever takes longer
+/// than its timeout (about a second), e.g. when transcription has every CPU
+/// core busy or around sleep/resume, and gives no notification. So:
+/// * the thread runs at the highest priority, so it answers in time even when
+///   the CPU is saturated, and
+/// * the hook is replaced every few seconds, so even if Windows drops it the
+///   shortcut recovers on its own instead of needing an app restart.
 pub fn start(sender: mpsc::Sender<HotkeyEvent>) {
     let _ = SENDER.set(sender);
     std::thread::Builder::new()
         .name("yappers-hotkey".into())
         .spawn(|| unsafe {
-            if let Err(e) = SetWindowsHookExW(WH_KEYBOARD_LL, Some(hook_proc), None, 0) {
-                log::error!("failed to install keyboard hook: {e}");
-                return;
+            if let Err(e) = SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL) {
+                log::warn!("couldn't raise hotkey thread priority: {e}");
             }
+            let Some(mut hook) = install_hook() else { return };
+            // A thread timer: WM_TIMER arrives in this thread's message queue.
+            SetTimer(None, 0, REINSTALL_EVERY_MS, None);
             let mut msg = MSG::default();
             while GetMessageW(&mut msg, None, 0, 0).as_bool() {
+                if msg.message == WM_TIMER {
+                    // Hook callbacks only run while this loop waits for
+                    // messages, so swapping here can't drop or double a key.
+                    if let Some(fresh) = install_hook() {
+                        let _ = UnhookWindowsHookEx(hook);
+                        hook = fresh;
+                    }
+                    continue;
+                }
                 let _ = TranslateMessage(&msg);
                 DispatchMessageW(&msg);
             }
         })
         .expect("spawn hotkey thread");
+}
+
+fn install_hook() -> Option<HHOOK> {
+    match unsafe { SetWindowsHookExW(WH_KEYBOARD_LL, Some(hook_proc), None, 0) } {
+        Ok(hook) => Some(hook),
+        Err(e) => {
+            log::error!("failed to install keyboard hook: {e}");
+            None
+        }
+    }
 }
 
 fn normalize(vk: u32) -> u32 {
