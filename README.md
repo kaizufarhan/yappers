@@ -10,6 +10,8 @@ Free, private voice dictation for Windows. Hold a shortcut, speak, and your word
 
 Yappers starts with Windows and lives in the system tray. Closing the window keeps it running; quit from the tray icon.
 
+**Updates are automatic** (from v0.1.1 on): Yappers checks for a new release on startup and every few hours, then installs it when you're not dictating.
+
 **Requirements:** Windows 10 or 11 (64-bit), a microphone, about 1 GB of free disk space, and 8 GB of RAM recommended. No GPU needed.
 
 ## How to use
@@ -64,9 +66,13 @@ npm run tauri dev
 
 In PowerShell, if scripts are blocked, use `npm.cmd run tauri dev`.
 
-Build the installer (outputs to `src-tauri/target/release/bundle/nsis/`):
+Releases are built by GitHub Actions: bump the version in `src-tauri/tauri.conf.json`, `src-tauri/Cargo.toml` and `package.json`, then push a tag like `v0.2.0`. The workflow builds the installer, signs the update, and publishes the release that installed copies update from.
 
-```bash
+To build the installer locally (outputs to `src-tauri/target/release/bundle/nsis/`), the update-signing key must be available, as in CI:
+
+```powershell
+$env:TAURI_SIGNING_PRIVATE_KEY = Get-Content -Raw ~/.tauri/yappers-updater.key
+$env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD = Get-Content -Raw ~/.tauri/yappers-updater.password
 npm run tauri build
 ```
 

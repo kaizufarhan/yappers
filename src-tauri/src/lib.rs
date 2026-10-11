@@ -9,6 +9,7 @@ mod overlay;
 mod paste;
 mod settings;
 mod sound;
+mod updater;
 
 use std::path::PathBuf;
 use std::sync::{mpsc, Arc, Mutex};
@@ -49,6 +50,7 @@ pub fn run() {
             Some(vec!["--hidden"]),
         ))
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
             let handle = app.handle().clone();
             let data_dir = app.path().app_data_dir()?;
@@ -94,6 +96,7 @@ pub fn run() {
                 let core = core.clone();
                 std::thread::spawn(move || core.model.load(&core.app));
             }
+            updater::spawn(handle.clone());
 
             // Turn on launch-at-login the first time an installed build runs.
             // Skipped in dev builds, which can't run without the dev server.
