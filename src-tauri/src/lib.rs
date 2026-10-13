@@ -98,19 +98,26 @@ pub fn run() {
             }
             updater::spawn(handle.clone());
 
-            // Turn on launch-at-login the first time an installed build runs.
-            // Skipped in dev builds, which can't run without the dev server.
+            // Launch-at-login is only managed by installed builds: a dev build
+            // can't run without the dev server, so it must never register.
             #[cfg(not(debug_assertions))]
             {
                 use tauri_plugin_autostart::ManagerExt;
+                let autolaunch = app.autolaunch();
                 let mut settings = core.settings.lock().unwrap();
-                if !settings.autostart_configured {
-                    if let Err(e) = app.autolaunch().enable() {
+                // Turn it on the first time an installed build runs, and
+                // otherwise re-register while it's on, so the login entry
+                // always points at this installed copy.
+                if !settings.autostart_configured || autolaunch.is_enabled().unwrap_or(false) {
+                    if let Err(e) = autolaunch.enable() {
                         log::warn!("couldn't enable launch at login: {e}");
                     }
+                }
+                if !settings.autostart_configured {
                     settings.autostart_configured = true;
                     let _ = settings.save(&core.settings_path);
                 }
+                remove_legacy_login_entry();
             }
 
             // Launched at login: stay in the tray unless setup is unfinished.
@@ -153,6 +160,22 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running Yappers");
+}
+
+/// Removes the login entry left by builds from when the app was called
+/// Murmur. If it pointed at an old or dev build, it could start first at
+/// login, and only one copy of the app may run, so the real one would quit.
+#[cfg(not(debug_assertions))]
+fn remove_legacy_login_entry() {
+    use windows::core::w;
+    use windows::Win32::System::Registry::{RegDeleteKeyValueW, HKEY_CURRENT_USER};
+    unsafe {
+        let _ = RegDeleteKeyValueW(
+            HKEY_CURRENT_USER,
+            w!(r"Software\Microsoft\Windows\CurrentVersion\Run"),
+            w!("Murmur"),
+        );
+    }
 }
 
 fn setup_tray(app: &AppHandle) -> tauri::Result<()> {

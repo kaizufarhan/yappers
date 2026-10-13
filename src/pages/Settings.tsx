@@ -105,11 +105,16 @@ export function SettingsPage({
 
       <Card title="System">
         <div className="divide-y divide-ink/25">
+          {/* A dev build can't run on its own (it needs the dev server), so it
+              must never register itself to start with Windows. */}
           <Toggle
             label="Launch at login"
-            description="Starts quietly in the system tray."
+            description={
+              import.meta.env.DEV ? "Only available in the installed app." : "Starts quietly in the system tray."
+            }
             checked={launchAtLogin}
             onChange={toggleLaunch}
+            disabled={import.meta.env.DEV}
           />
           <Toggle
             label="Dictation sounds"

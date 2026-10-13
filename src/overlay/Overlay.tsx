@@ -155,7 +155,7 @@ export function Overlay() {
                   transition={{ duration: 0.16, ease: EASE_OUT }}
                 >
                   {view === "words" && <LiveWords words={words} batch={batch} />}
-                  {view === "listening" && <Hint>Listening…</Hint>}
+                  {view === "listening" && <Hint>Yap away...</Hint>}
                   {view === "processing" && <Pasting />}
                   {state.state === "error" && (
                     <span className="flex min-w-0 items-center gap-1.5 text-[13px] text-[#fff8f2]" title={state.message}>
