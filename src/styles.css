@@ -105,3 +105,16 @@ body {
 .rise {
   animation: rise 0.35s ease-out both;
 }
+
+/* A progress bar with no known total. */
+@keyframes indeterminate {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(400%);
+  }
+}
+.indeterminate {
+  animation: indeterminate 1.4s ease-in-out infinite;
+}

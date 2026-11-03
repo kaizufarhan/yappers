@@ -131,7 +131,9 @@ function Stat({ label, value }: { label: string; value: string }) {
 function SetupCard({ status }: { status: ModelStatus }) {
   const [starting, setStarting] = useState(false);
   const downloading = status.state === "downloading";
-  const pct = downloading && status.total > 0 ? (status.downloaded / status.total) * 100 : 0;
+  // Total is 0 while the sizes are being looked up, or if the server didn't send them.
+  const sized = downloading && status.total > 0;
+  const pct = sized ? (status.downloaded / status.total) * 100 : 0;
 
   const start = async () => {
     setStarting(true);
@@ -158,12 +160,22 @@ function SetupCard({ status }: { status: ModelStatus }) {
       <div className="mt-7">
         {downloading ? (
           <div>
-            <div className="h-5 border-2 border-ink bg-card">
-              <div className="h-full bg-ink transition-[width] duration-200" style={{ width: `${pct}%` }} />
+            <div className="h-5 overflow-hidden border-2 border-ink bg-card">
+              {sized ? (
+                <div className="h-full bg-ink transition-[width] duration-200" style={{ width: `${pct}%` }} />
+              ) : (
+                <div className="indeterminate h-full w-1/4 bg-ink" />
+              )}
             </div>
             <p className="mt-2.5 flex justify-between font-mono text-[12px] font-medium">
-              <span>{formatBytes(status.downloaded)} of {formatBytes(status.total)}</span>
-              <span>{pct.toFixed(0)}%</span>
+              {sized ? (
+                <>
+                  <span>{formatBytes(status.downloaded)} of {formatBytes(status.total)}</span>
+                  <span>{pct.toFixed(0)}%</span>
+                </>
+              ) : (
+                <span>{status.downloaded > 0 ? `${formatBytes(status.downloaded)} downloaded` : "Starting download…"}</span>
+              )}
             </p>
           </div>
         ) : (
