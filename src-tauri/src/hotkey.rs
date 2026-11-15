@@ -7,18 +7,23 @@
 
 use crate::settings::{VK_CONTROL, VK_LWIN, VK_MENU, VK_SHIFT};
 use std::cell::RefCell;
-use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU64, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU32, AtomicU64, AtomicU8, Ordering};
 use std::time::{Duration, Instant};
 use std::sync::{mpsc, OnceLock, RwLock};
-use windows::Win32::Foundation::{LPARAM, LRESULT, WPARAM};
+use windows::Win32::Foundation::{CloseHandle, HANDLE, LPARAM, LRESULT, WPARAM};
+use windows::Win32::Security::{GetTokenInformation, TokenElevation, TOKEN_ELEVATION, TOKEN_QUERY};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetAsyncKeyState, SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP, VIRTUAL_KEY,
+    GetAsyncKeyState, GetLastInputInfo, SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYBD_EVENT_FLAGS,
+    KEYEVENTF_KEYUP, LASTINPUTINFO, VIRTUAL_KEY,
 };
-use windows::Win32::System::Threading::{GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_TIME_CRITICAL};
+use windows::Win32::System::Threading::{
+    GetCurrentThread, GetCurrentThreadId, OpenProcess, OpenProcessToken, SetThreadPriority,
+    PROCESS_QUERY_LIMITED_INFORMATION, THREAD_PRIORITY_TIME_CRITICAL,
+};
 use windows::Win32::UI::WindowsAndMessaging::{
-    CallNextHookEx, DispatchMessageW, GetForegroundWindow, GetMessageW, SetTimer, SetWindowsHookExW, TranslateMessage,
-    UnhookWindowsHookEx, HC_ACTION, HHOOK, KBDLLHOOKSTRUCT, LLKHF_INJECTED, MSG, WH_KEYBOARD_LL, WM_KEYDOWN, WM_KEYUP,
-    WM_SYSKEYDOWN, WM_SYSKEYUP, WM_TIMER,
+    CallNextHookEx, DispatchMessageW, GetForegroundWindow, GetMessageW, GetWindowThreadProcessId, PostThreadMessageW,
+    SetTimer, SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx, HC_ACTION, HHOOK, KBDLLHOOKSTRUCT,
+    LLKHF_INJECTED, MSG, WH_KEYBOARD_LL, WM_KEYDOWN, WM_KEYUP, WM_QUIT, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_TIMER,
 };
 
 const VK_ESCAPE: u32 = 0x1B;
@@ -56,6 +61,8 @@ pub enum HotkeyEvent {
 /// Tag placed in `dwExtraInfo` of every key event Yappers sends, so the hook
 /// can tell our own synthetic input apart from real (or remapped) keys.
 pub const INPUT_TAG: usize = 0x5941_5053; // "YAPS"
+/// Tag on the test key the watchdog sends to check the hook still hears keys.
+const PROBE_TAG: usize = 0x5941_5050; // "YAPP"
 
 static SENDER: OnceLock<mpsc::Sender<HotkeyEvent>> = OnceLock::new();
 static TARGET: RwLock<Vec<u32>> = RwLock::new(Vec::new());
@@ -63,6 +70,10 @@ static CAPTURING: AtomicBool = AtomicBool::new(false);
 static MAIN_WINDOW: AtomicIsize = AtomicIsize::new(0);
 static RESET_GENERATION: AtomicU64 = AtomicU64::new(0);
 pub static RECORDING: AtomicBool = AtomicBool::new(false);
+/// Thread id of the current hook thread, so the watchdog can replace it.
+static HOOK_THREAD: AtomicU32 = AtomicU32::new(0);
+/// Every key event the hook has been called with, real or probe.
+static HOOK_EVENTS: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Default)]
 struct HookState {
@@ -109,11 +120,25 @@ const REINSTALL_EVERY_MS: u32 = 5_000;
 ///   the CPU is saturated, and
 /// * the hook is replaced every few seconds, so even if Windows drops it the
 ///   shortcut recovers on its own instead of needing an app restart.
+///
+/// Reinstalling from the same thread isn't always enough: a hook can stay
+/// installed yet stop being called, which left the shortcut working only
+/// inside the Yappers window until a restart. A watchdog (see `watch_hook`)
+/// checks that the hook still hears keys and replaces the whole thread if not.
 pub fn start(sender: mpsc::Sender<HotkeyEvent>) {
     let _ = SENDER.set(sender);
+    spawn_hook_thread();
+    std::thread::Builder::new()
+        .name("yappers-hotkey-watchdog".into())
+        .spawn(watch_hook)
+        .expect("spawn hotkey watchdog");
+}
+
+fn spawn_hook_thread() {
     std::thread::Builder::new()
         .name("yappers-hotkey".into())
         .spawn(|| unsafe {
+            HOOK_THREAD.store(GetCurrentThreadId(), Ordering::SeqCst);
             if let Err(e) = SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL) {
                 log::warn!("couldn't raise hotkey thread priority: {e}");
             }
@@ -121,7 +146,8 @@ pub fn start(sender: mpsc::Sender<HotkeyEvent>) {
             // A thread timer: WM_TIMER arrives in this thread's message queue.
             SetTimer(None, 0, REINSTALL_EVERY_MS, None);
             let mut msg = MSG::default();
-            while GetMessageW(&mut msg, None, 0, 0).as_bool() {
+            // Stops on WM_QUIT (0) from the watchdog, or on an error (-1).
+            while GetMessageW(&mut msg, None, 0, 0).0 > 0 {
                 if msg.message == WM_TIMER {
                     // Hook callbacks only run while this loop waits for
                     // messages, so swapping here can't drop or double a key.
@@ -134,8 +160,129 @@ pub fn start(sender: mpsc::Sender<HotkeyEvent>) {
                 let _ = TranslateMessage(&msg);
                 DispatchMessageW(&msg);
             }
+            let _ = UnhookWindowsHookEx(hook);
         })
         .expect("spawn hotkey thread");
+}
+
+/// How often the watchdog may check the hook.
+const PROBE_EVERY: Duration = Duration::from_secs(5);
+/// How long the hook gets to report the test key.
+const PROBE_TIMEOUT: Duration = Duration::from_secs(1);
+/// Minimum gap between hook thread replacements, should one not help.
+const RESTART_AT_MOST_EVERY: Duration = Duration::from_secs(60);
+
+/// Checks that the hook is still being called, and replaces the hook thread
+/// when it isn't.
+///
+/// When the hook has heard keys recently it is plainly alive. Otherwise, and
+/// only while the user is active, it sends a tagged, unassigned key that the
+/// hook swallows (no app ever sees it). Windows counts injected keys as user
+/// activity, so it never probes twice without real input in between; an idle
+/// PC still sleeps and screen-savers still start.
+fn watch_hook() {
+    let mut seen_events = HOOK_EVENTS.load(Ordering::SeqCst);
+    let mut seen_input = last_input_tick();
+    let mut last_restart: Option<Instant> = None;
+    loop {
+        std::thread::sleep(PROBE_EVERY);
+        let events = HOOK_EVENTS.load(Ordering::SeqCst);
+        let input = last_input_tick();
+        let hook_heard_keys = events != seen_events;
+        let user_active = input != seen_input;
+        seen_events = events;
+        seen_input = input;
+        if hook_heard_keys || !user_active || !foreground_accepts_input() {
+            continue;
+        }
+
+        if !send_probe() {
+            continue;
+        }
+        let deadline = Instant::now() + PROBE_TIMEOUT;
+        while HOOK_EVENTS.load(Ordering::SeqCst) == events && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        // The probe itself counts as input and as hook events. Let Windows
+        // finish recording it so it isn't mistaken for the user next time.
+        std::thread::sleep(Duration::from_millis(200));
+        seen_input = last_input_tick();
+        seen_events = HOOK_EVENTS.load(Ordering::SeqCst);
+        if seen_events != events {
+            continue;
+        }
+
+        if last_restart.is_some_and(|at| at.elapsed() < RESTART_AT_MOST_EVERY) {
+            continue;
+        }
+        log::warn!("keyboard hook stopped receiving keys; restarting it");
+        let old = HOOK_THREAD.load(Ordering::SeqCst);
+        unsafe {
+            let _ = PostThreadMessageW(old, WM_QUIT, WPARAM(0), LPARAM(0));
+        }
+        spawn_hook_thread();
+        last_restart = Some(Instant::now());
+    }
+}
+
+fn last_input_tick() -> u32 {
+    let mut info = LASTINPUTINFO { cbSize: std::mem::size_of::<LASTINPUTINFO>() as u32, dwTime: 0 };
+    unsafe {
+        let _ = GetLastInputInfo(&mut info);
+    }
+    info.dwTime
+}
+
+/// False when Windows keeps our hook from seeing keys anyway: on the lock
+/// screen or a UAC prompt (no foreground window), or while an app running as
+/// administrator is focused. A probe there would fail for no fault of ours.
+fn foreground_accepts_input() -> bool {
+    unsafe {
+        let hwnd = GetForegroundWindow();
+        if hwnd.0.is_null() {
+            return false;
+        }
+        let mut pid = 0;
+        GetWindowThreadProcessId(hwnd, Some(&mut pid));
+        if pid == 0 || pid == std::process::id() {
+            return pid != 0;
+        }
+        let Ok(process) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) else {
+            return false;
+        };
+        let mut token = HANDLE::default();
+        let mut elevated = true;
+        if OpenProcessToken(process, TOKEN_QUERY, &mut token).is_ok() {
+            let mut elevation = TOKEN_ELEVATION::default();
+            let mut len = 0;
+            if GetTokenInformation(
+                token,
+                TokenElevation,
+                Some(&mut elevation as *mut _ as *mut _),
+                std::mem::size_of::<TOKEN_ELEVATION>() as u32,
+                &mut len,
+            )
+            .is_ok()
+            {
+                elevated = elevation.TokenIsElevated != 0;
+            }
+            let _ = CloseHandle(token);
+        }
+        let _ = CloseHandle(process);
+        !elevated
+    }
+}
+
+/// Sends the test key; false if Windows refused it.
+fn send_probe() -> bool {
+    let key = |flags: KEYBD_EVENT_FLAGS| INPUT {
+        r#type: INPUT_KEYBOARD,
+        Anonymous: INPUT_0 {
+            ki: KEYBDINPUT { wVk: VIRTUAL_KEY(VK_MASK), dwFlags: flags, dwExtraInfo: PROBE_TAG, ..Default::default() },
+        },
+    };
+    let sent = unsafe { SendInput(&[key(KEYBD_EVENT_FLAGS(0)), key(KEYEVENTF_KEYUP)], std::mem::size_of::<INPUT>() as i32) };
+    sent == 2
 }
 
 fn install_hook() -> Option<HHOOK> {
@@ -192,6 +339,10 @@ fn send_mask_key() {
 unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     if code == HC_ACTION as i32 {
         let kb = &*(lparam.0 as *const KBDLLHOOKSTRUCT);
+        HOOK_EVENTS.fetch_add(1, Ordering::Relaxed);
+        if kb.dwExtraInfo == PROBE_TAG {
+            return LRESULT(1); // the watchdog's test key; no app should see it
+        }
         // Ignore only input Yappers itself sent (the Ctrl+V paste). Other
         // synthetic input must still count: keyboard software like Logitech
         // G HUB or PowerToys re-sends remapped keys as injected events.
