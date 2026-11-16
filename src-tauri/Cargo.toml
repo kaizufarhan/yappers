@@ -1,6 +1,6 @@
 [package]
 name = "yappers"
-version = "0.1.3"
+version = "0.1.4"
 description = "Free, private, local voice dictation"
 authors = ["Farhan Ahmed"]
 license = "MIT"
